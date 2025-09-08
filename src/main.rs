@@ -171,6 +171,7 @@ enum VideoMessage {
     Play,
     Pause,
     Seek(f64),
+    Error(String), // Adicionado para propagar erros
 }
 
 struct RambleyFlixApp {
@@ -235,6 +236,9 @@ struct RambleyFlixApp {
 
     video_speed_tx: mpsc::Sender<VideoMessage>,
     video_speed_rx: Option<mpsc::Receiver<VideoMessage>>,
+
+    // Flag para controlar o ciclo de vida da thread de vídeo
+    video_thread_running: bool,
 }
 
 impl WebScraper {
@@ -613,6 +617,7 @@ impl RambleyFlixApp {
 
             video_speed_tx,
             video_speed_rx: Some(video_speed_rx),
+            video_thread_running: false, // Inicializa flag
         };
 
         app.add_default_users();
@@ -1412,6 +1417,8 @@ impl RambleyFlixApp {
                         self.state = AppState::VideoResults;
                         self.video_texture = None;
                         self.video_message_receiver = None;
+                        // Garantir que a thread do vídeo seja encerrada
+                        self.video_thread_running = false;
                     }
 
                     if ui.button("🔳 Fullscreen").clicked() {
@@ -1719,6 +1726,7 @@ impl RambleyFlixApp {
     }
 
     fn play_video(&mut self, video: VideoResult) {
+        // Limpar recursos anteriores
         self.video_texture = None;
         self.video_message_receiver = None;
         self.save_to_history(&video.url);
@@ -1729,6 +1737,9 @@ impl RambleyFlixApp {
 
         self.start_recommendations_search(video.clone());
         self.state = AppState::PlayingVideo;
+
+        // Resetar flag antes de iniciar nova thread
+        self.video_thread_running = true;
 
         let video_speed_rx = self.video_speed_rx.take();
 
@@ -1781,6 +1792,8 @@ impl RambleyFlixApp {
 
             // Thread para controles (play/pause/seek)
             let pipeline_clone = pipeline.clone();
+            let video_thread_running = true; // Flag para controlar a thread
+
             thread::spawn(move || {
                 if let Some(receiver) = video_speed_rx {
                     while let Ok(message) = receiver.recv() {
@@ -1816,8 +1829,15 @@ impl RambleyFlixApp {
             });
 
             // Captura de frames sem travar a UI
+            let video_message_sender_clone = video_message_sender.clone();
+
             thread::spawn(move || {
                 loop {
+                    // Verificar se a thread deve continuar rodando
+                    if !video_thread_running {
+                        break;
+                    }
+
                     match appsink.pull_sample() {
                         Ok(sample) => {
                             if let (Some(buffer), Some(caps)) = (sample.buffer(), sample.caps()) {
@@ -1828,10 +1848,18 @@ impl RambleyFlixApp {
                                     ) {
                                         if let Ok(map) = buffer.map_readable() {
                                             let frame_data = map.as_slice().to_vec();
-                                            let _ = video_message_sender.send(VideoMessage::Frame(
-                                                frame_data,
-                                                (width as usize, height as usize),
-                                            ));
+
+                                            // Validar tamanho do frame
+                                            let expected_size = width * height * 4;
+                                            if frame_data.len() >= expected_size as usize {
+                                                let _ = video_message_sender_clone.send(VideoMessage::Frame(
+                                                    frame_data,
+                                                    (width as usize, height as usize),
+                                                ));
+                                            } else {
+                                                eprintln!("Frame inválido: esperado {} bytes, recebido {}",
+                                                          expected_size, frame_data.len());
+                                            }
                                         }
                                     }
                                 }
@@ -1850,6 +1878,9 @@ impl RambleyFlixApp {
                         gst::MessageView::Eos(..) => break,
                         gst::MessageView::Error(err) => {
                             eprintln!("Error: {}", err.error());
+                            let _ = video_message_sender.send(VideoMessage::Error(
+                                format!("Erro no GStreamer: {}", err.error())
+                            ));
                             break;
                         }
                         _ => {}
@@ -2057,16 +2088,22 @@ impl eframe::App for RambleyFlixApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_async_messages(ctx);
 
-        // Handle video frame updates (FPS otimizado)
-        if let Some(reciver) = &self.video_message_receiver {
-            while let Ok(VideoMessage::Frame(frame_data, (width, height))) = reciver.try_recv() {
-                let color_image = egui::ColorImage::from_rgba_unmultiplied([width, height], &frame_data);
+        // Handle video frame updates (FPS otimizado) - usar try_recv em vez de recv
+        if let Some(receiver) = &self.video_message_receiver {
+            while let Ok(VideoMessage::Frame(frame_data, (width, height))) = receiver.try_recv() {
+                // Validação de tamanho de frame
+                if frame_data.len() >= width * height * 4 {
+                    let color_image = egui::ColorImage::from_rgba_unmultiplied([width, height], &frame_data);
 
-                if let Some((texture, _)) = &mut self.video_texture {
-                    texture.set(color_image, egui::TextureOptions::default());
+                    if let Some((texture, _)) = &mut self.video_texture {
+                        texture.set(color_image, egui::TextureOptions::default());
+                    } else {
+                        let texture = ctx.load_texture("video_frame", color_image, egui::TextureOptions::default());
+                        self.video_texture = Some((texture, (width, height)));
+                    }
                 } else {
-                    let texture = ctx.load_texture("video_frame", color_image, egui::TextureOptions::default());
-                    self.video_texture = Some((texture, (width, height)));
+                    eprintln!("Frame inválido: esperado {} bytes, recebido {}",
+                              width * height * 4, frame_data.len());
                 }
             }
         }

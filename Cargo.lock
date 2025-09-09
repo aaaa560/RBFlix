@@ -12,7 +12,6 @@ dependencies = [
  "egui",
  "gstreamer",
  "gstreamer-app",
- "gstreamer-video",
  "image",
  "open",
  "reqwest",
@@ -1871,36 +1870,6 @@ dependencies = [
  "cfg-if",
  "glib-sys",
  "gobject-sys",
- "libc",
- "system-deps 7.0.5",
-]
-
-[[package]]
-name = "gstreamer-video"
-version = "0.24.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2a0e4dbc6b5563fa252eaeb4297ca04e7dd2e239c68f67eeeb95148f7d31652"
-dependencies = [
- "cfg-if",
- "futures-channel",
- "glib",
- "gstreamer",
- "gstreamer-base",
- "gstreamer-video-sys",
- "libc",
- "thiserror 2.0.16",
-]
-
-[[package]]
-name = "gstreamer-video-sys"
-version = "0.24.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d944b1492bdd7a72a02ae9a5da6e34a29194b8623d3bd02752590b06fb837a7"
-dependencies = [
- "glib-sys",
- "gobject-sys",
- "gstreamer-base-sys",
- "gstreamer-sys",
  "libc",
  "system-deps 7.0.5",
 ]

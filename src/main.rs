@@ -59,7 +59,6 @@ struct Playlist {
     name: String,
     videos: Vec<VideoMeta>,
     created_at: String,
-
 }
 
 // Dados do usuário
@@ -228,7 +227,6 @@ struct RambleyFlixApp {
     video_command_tx: Option<mpsc::Sender<VideoCommand>>,
     video_thread_handle: Option<thread::JoinHandle<()>>,
     // ------------------------------------------------
-
     video_speed: f64,
     is_playing: bool,
     video_progress: f32,
@@ -268,9 +266,7 @@ impl WebScraper {
                 video_selector: "ytd-video-renderer a#thumbnail".to_string(),
                 title_selector: "a#video-title".to_string(),
                 thumbnail_selector: Some("yt-image img".to_string()),
-                duration_selector: Some(
-                    "ytd-thumbnail-overlay-time-status-renderer".to_string(),
-                ),
+                duration_selector: Some("ytd-thumbnail-overlay-time-status-renderer".to_string()),
                 url_transform: Some(|href: &str| {
                     if href.starts_with('/') {
                         format!("https://www.youtube.com{}", href)
@@ -279,9 +275,7 @@ impl WebScraper {
                     }
                 }),
                 recommendations_path: None,
-                recommendations_selector: Some(
-                    "ytd-compact-video-renderer".to_string(),
-                ),
+                recommendations_selector: Some("ytd-compact-video-renderer".to_string()),
             },
         );
 
@@ -410,13 +404,14 @@ impl WebScraper {
                 let url = (config.url_transform.unwrap_or(|s| s.to_string()))(href);
 
                 let title_selector = Selector::parse(&config.title_selector).ok();
-                let title = title_selector.and_then(|sel| {
-                    element
-                        .select(&sel)
-                        .next()
-                        .map(|t| t.text().collect::<String>().trim().to_string())
-                }).unwrap_or_default();
-
+                let title = title_selector
+                    .and_then(|sel| {
+                        element
+                            .select(&sel)
+                            .next()
+                            .map(|t| t.text().collect::<String>().trim().to_string())
+                    })
+                    .unwrap_or_default();
 
                 let thumbnail = if let Some(thumb_sel) = &config.thumbnail_selector {
                     if let Ok(selector) = Selector::parse(thumb_sel) {
@@ -600,7 +595,14 @@ impl RambleyFlixApp {
     fn add_default_users(&mut self) {
         let senha_secreta = "";
 
-        self.users.insert("".to_string(), User { username: "".to_string(), password: "".to_string(), access: AccessLevel::Full });
+        self.users.insert(
+            "".to_string(),
+            User {
+                username: "".to_string(),
+                password: "".to_string(),
+                access: AccessLevel::Full,
+            },
+        );
 
         self.users.insert(
             "Decaptado".to_string(),
@@ -914,7 +916,10 @@ impl RambleyFlixApp {
                 let response = ui.text_edit_singleline(&mut self.search_input);
 
                 let search_button = ui.button("🔍 Buscar");
-                if (search_button.clicked() || response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) && !self.search_input.is_empty() {
+                if (search_button.clicked()
+                    || response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    && !self.search_input.is_empty()
+                {
                     self.loading_search = true;
                     self.video_results.clear();
                     self.video_thumbnails.clear();
@@ -1071,7 +1076,10 @@ impl RambleyFlixApp {
                     if !self.video_thumbnails.contains_key(&video.url) {
                         self.video_thumbnails.insert(
                             video.url.clone(),
-                            VideoThumbnail { texture: None, loading: true },
+                            VideoThumbnail {
+                                texture: None,
+                                loading: true,
+                            },
                         );
                         self.load_thumbnail(&video.url, thumbnail_url);
                     }
@@ -1109,9 +1117,12 @@ impl RambleyFlixApp {
                     ui.horizontal(|ui| {
                         ui.strong(&video.title);
                         if let Some(duration) = &video.duration {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(format!("⏱ {}", duration));
-                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(format!("⏱ {}", duration));
+                                },
+                            );
                         }
                     });
                     ui.label(format!("🌐 {}", video.site));
@@ -1127,10 +1138,12 @@ impl RambleyFlixApp {
                                     }
                                     AccessLevel::Fake => {
                                         self.error_message =
-                                            "Acesso negado. Usuário sem permissão real.".to_string();
+                                            "Acesso negado. Usuário sem permissão real."
+                                                .to_string();
                                     }
                                     AccessLevel::NetflixOnly => {
-                                        self.error_message = "Acesso permitido apenas ao Netflix.".to_string();
+                                        self.error_message =
+                                            "Acesso permitido apenas ao Netflix.".to_string();
                                     }
                                     AccessLevel::None => {
                                         self.error_message = "Sem acesso.".to_string();
@@ -1165,7 +1178,12 @@ impl RambleyFlixApp {
         });
     }
 
-    fn show_compact_recommendation_item(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context, video: &VideoResult) {
+    fn show_compact_recommendation_item(
+        &mut self,
+        ui: &mut egui::Ui,
+        _ctx: &egui::Context,
+        video: &VideoResult,
+    ) {
         ui.group(|ui| {
             ui.set_width(230.0);
 
@@ -1696,7 +1714,11 @@ impl RambleyFlixApp {
             let pipeline = pipeline.downcast::<gst::Pipeline>().unwrap();
 
             // Configura o appsink
-            let appsink = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
+            let appsink = pipeline
+                .by_name("sink")
+                .unwrap()
+                .downcast::<gst_app::AppSink>()
+                .unwrap();
 
             // Corrigido: `new_simple` para `Caps::builder`
             let caps = gst::Caps::builder("video/x-raw")
@@ -1716,13 +1738,16 @@ impl RambleyFlixApp {
                         let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
                         let caps = sample.caps().ok_or(gst::FlowError::Error)?;
                         let s = caps.structure(0).ok_or(gst::FlowError::Error)?;
-                        let width = s.get::<i32>("width").map_err(|_| gst::FlowError::Error)? as usize;
-                        let height = s.get::<i32>("height").map_err(|_| gst::FlowError::Error)? as usize;
+                        let width =
+                            s.get::<i32>("width").map_err(|_| gst::FlowError::Error)? as usize;
+                        let height =
+                            s.get::<i32>("height").map_err(|_| gst::FlowError::Error)? as usize;
 
                         let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
 
                         // Cria a ColorImage diretamente
-                        let color_image = ColorImage::from_rgba_unmultiplied([width, height], map.as_slice());
+                        let color_image =
+                            ColorImage::from_rgba_unmultiplied([width, height], map.as_slice());
 
                         // Coloca no buffer compartilhado
                         *frame_buffer_clone.lock().unwrap() = Some(color_image);
@@ -1734,7 +1759,9 @@ impl RambleyFlixApp {
             );
 
             // Inicia a reprodução
-            pipeline.set_state(gst::State::Playing).expect("Não foi possível iniciar o pipeline");
+            pipeline
+                .set_state(gst::State::Playing)
+                .expect("Não foi possível iniciar o pipeline");
 
             let bus = pipeline.bus().unwrap();
 
@@ -1762,10 +1789,10 @@ impl RambleyFlixApp {
                         match command {
                             VideoCommand::Play => {
                                 pipeline.set_state(gst::State::Playing).ok();
-                            },
+                            }
                             VideoCommand::Pause => {
                                 pipeline.set_state(gst::State::Paused).ok();
-                            },
+                            }
                             VideoCommand::SetSpeed(rate) => {
                                 // Corrigido: Nova forma de criar o evento de seek
                                 let seek_event = gst::event::Seek::new(
@@ -1779,20 +1806,31 @@ impl RambleyFlixApp {
                                 pipeline.send_event(seek_event);
                             }
                             VideoCommand::Seek(nanos) => {
-                                if let Some(current_pos) = pipeline.query_position::<gst::ClockTime>() {
+                                if let Some(current_pos) =
+                                    pipeline.query_position::<gst::ClockTime>()
+                                {
                                     let new_pos = if nanos > 0 {
-                                        current_pos.saturating_add(gst::ClockTime::from_nseconds(nanos as u64))
+                                        current_pos.saturating_add(gst::ClockTime::from_nseconds(
+                                            nanos as u64,
+                                        ))
                                     } else {
-                                        current_pos.saturating_sub(gst::ClockTime::from_nseconds(-nanos as u64))
+                                        current_pos.saturating_sub(gst::ClockTime::from_nseconds(
+                                            -nanos as u64,
+                                        ))
                                     };
-                                    pipeline.seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT, new_pos).ok();
+                                    pipeline
+                                        .seek_simple(
+                                            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                                            new_pos,
+                                        )
+                                        .ok();
                                 }
-                            },
+                            }
                             VideoCommand::Stop => {
                                 break 'main_loop;
                             }
                         }
-                    },
+                    }
                     Err(mpsc::TryRecvError::Disconnected) => {
                         println!("Canal de comando desconectado, encerrando thread.");
                         break 'main_loop;
@@ -1802,7 +1840,9 @@ impl RambleyFlixApp {
             }
 
             // Limpeza final
-            pipeline.set_state(gst::State::Null).expect("Não foi possível parar o pipeline");
+            pipeline
+                .set_state(gst::State::Null)
+                .expect("Não foi possível parar o pipeline");
             println!("Thread do GStreamer finalizado.");
         }));
     }
@@ -1864,9 +1904,15 @@ impl RambleyFlixApp {
             if !playlist.videos.iter().any(|v| v.url == video.url) {
                 playlist.videos.push(video_meta);
                 self.save_user_data();
-                println!("Vídeo '{}' adicionado à playlist '{}'.", video.title, playlist_name);
+                println!(
+                    "Vídeo '{}' adicionado à playlist '{}'.",
+                    video.title, playlist_name
+                );
             } else {
-                println!("Vídeo '{}' já está na playlist '{}'.", video.title, playlist_name);
+                println!(
+                    "Vídeo '{}' já está na playlist '{}'.",
+                    video.title, playlist_name
+                );
             }
         }
     }
@@ -1924,7 +1970,10 @@ impl RambleyFlixApp {
 
             ui.add_space(10.0);
 
-            if ui.add_sized(button_size, egui::Button::new("📝 Playlists")).clicked() {
+            if ui
+                .add_sized(button_size, egui::Button::new("📝 Playlists"))
+                .clicked()
+            {
                 self.state = AppState::PlaylistView;
             }
 
@@ -2058,15 +2107,19 @@ impl RambleyFlixApp {
                 if playlist.videos.is_empty() {
                     ui.label("Esta playlist está vazia.");
                 } else {
-                    let videos_as_results: Vec<VideoResult> = playlist.videos.iter().map(|meta| {
-                        VideoResult {
-                            title: meta.title.clone(),
-                            url: meta.url.clone(),
-                            thumbnail: meta.thumbnail.clone(),
-                            duration: None,
-                            site: "Local".to_string(), // Marcador para vídeos locais/salvos
-                        }
-                    }).collect();
+                    let videos_as_results: Vec<VideoResult> = playlist
+                        .videos
+                        .iter()
+                        .map(|meta| {
+                            VideoResult {
+                                title: meta.title.clone(),
+                                url: meta.url.clone(),
+                                thumbnail: meta.thumbnail.clone(),
+                                duration: None,
+                                site: "Local".to_string(), // Marcador para vídeos locais/salvos
+                            }
+                        })
+                        .collect();
 
                     for video in videos_as_results.iter() {
                         self.show_video_item(ui, ctx, video);
@@ -2076,7 +2129,6 @@ impl RambleyFlixApp {
             }
         });
     }
-
 }
 
 impl Default for RambleyFlixApp {
@@ -2105,7 +2157,11 @@ impl eframe::App for RambleyFlixApp {
                         texture.set(new_frame, egui::TextureOptions::LINEAR);
                     } else {
                         // Senão, cria uma nova textura
-                        let texture = ctx.load_texture("video_frame", new_frame, egui::TextureOptions::LINEAR);
+                        let texture = ctx.load_texture(
+                            "video_frame",
+                            new_frame,
+                            egui::TextureOptions::LINEAR,
+                        );
                         self.video_texture = Some(texture);
                     }
                 }
@@ -2170,7 +2226,7 @@ impl eframe::App for RambleyFlixApp {
                     ui.heading("📝 Playlists");
                     ui.separator();
                     self.show_playlist_view(ui);
-                },
+                }
                 AppState::ActivePlaylistView => self.show_active_playlist_view(ui, ctx),
             });
         } else {

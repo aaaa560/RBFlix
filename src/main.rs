@@ -12,18 +12,20 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use tokio::runtime::Runtime;
-use tokio::sync::Mutex;
+use tokio::sync::Mutex as TokioMutex;
 
+// Mensagens assíncronas
 enum AsyncMessage {
     SearchComplete(Result<Vec<VideoResult>, String>),
     ThumbnailLoaded(String, Result<Vec<u8>, String>),
     RecommendationsComplete(Result<Vec<VideoResult>, String>),
 }
 
-#[derive(Debug, Clone)]
+// Level de acesso
+#[derive(Debug, Clone, PartialEq)]
 enum AccessLevel {
     Full,
     ViewOnly,
@@ -32,6 +34,7 @@ enum AccessLevel {
     None,
 }
 
+// Resultado de vídeo
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct VideoResult {
     title: String,
@@ -41,6 +44,7 @@ struct VideoResult {
     site: String,
 }
 
+// Metadata de vídeo
 #[derive(Serialize, Deserialize, Clone)]
 struct VideoMeta {
     url: String,
@@ -49,6 +53,7 @@ struct VideoMeta {
     last_position: f32,
 }
 
+// Playlist
 #[derive(Serialize, Deserialize, Clone)]
 struct Playlist {
     name: String,
@@ -56,6 +61,7 @@ struct Playlist {
     created_at: String,
 }
 
+// Dados do usuário
 #[derive(Serialize, Deserialize)]
 struct UserData {
     last_watched: Vec<VideoMeta>,
@@ -67,7 +73,7 @@ impl UserData {
     fn load(config_dir: &PathBuf) -> Self {
         let path = config_dir.join("user_data.json");
         if let Ok(content) = fs::read_to_string(&path) {
-            serde_json::from_str(&content).unwrap_or(Self::default())
+            serde_json::from_str(&content).unwrap_or_else(|_| Self::default())
         } else {
             Self::default()
         }
@@ -91,6 +97,7 @@ impl Default for UserData {
     }
 }
 
+// Configurações do app
 #[derive(Serialize, Deserialize)]
 struct AppSettings {
     default_quality: String,
@@ -118,6 +125,7 @@ impl Default for AppSettings {
     }
 }
 
+// Config de sites
 #[derive(Debug, Clone)]
 struct SiteConfig {
     base_url: String,
@@ -131,11 +139,13 @@ struct SiteConfig {
     recommendations_selector: Option<String>,
 }
 
+// Scraper
 struct WebScraper {
     client: reqwest::Client,
     site_configs: HashMap<String, SiteConfig>,
 }
 
+// Usuário
 #[derive(Debug, Clone)]
 struct User {
     username: String,
@@ -143,12 +153,14 @@ struct User {
     access: AccessLevel,
 }
 
+// Thumbnail do vídeo
 #[allow(dead_code)]
 struct VideoThumbnail {
     texture: Option<TextureHandle>,
     loading: bool,
 }
 
+// Estado do app
 #[derive(PartialEq)]
 enum AppState {
     Login,
@@ -163,19 +175,19 @@ enum AppState {
     Downloads,
 }
 
-// Mensagem para comunicar entre as threads de vídeo
+// Mensagens de controle do vídeo
 #[derive(Debug)]
-enum VideoMessage {
-    Frame(Vec<u8>, (usize, usize)),
-    SetSpeed(f64),
+enum VideoCommand {
     Play,
     Pause,
-    Seek(f64),
-    Error(String), // Adicionado para propagar erros
+    Seek(i64), // Em nanossegundos
+    SetSpeed(f64),
+    Stop,
 }
 
+// O app principal
 struct RambleyFlixApp {
-    scraper: Arc<Mutex<WebScraper>>,
+    scraper: Arc<TokioMutex<WebScraper>>,
     users: HashMap<String, User>,
     current_user: Option<User>,
     login_attempts: u32,
@@ -201,15 +213,20 @@ struct RambleyFlixApp {
     async_sender: mpsc::Sender<AsyncMessage>,
     async_receiver: mpsc::Receiver<AsyncMessage>,
 
-    video_texture: Option<(egui::TextureHandle, (usize, usize))>,
-    video_message_receiver: Option<mpsc::Receiver<VideoMessage>>,
-
     current_playing_video: Option<VideoResult>,
     video_recommendations: Vec<VideoResult>,
     loading_recommendations: bool,
     recommendations_error: String,
 
-    // Novos campos para funcionalidades melhoradas
+    // --- Campos do Player de Vídeo (Refatorados) ---
+    video_texture: Option<TextureHandle>,
+    // Buffer compartilhado para o frame mais recente
+    current_frame: Option<Arc<Mutex<Option<ColorImage>>>>,
+    // Canal para enviar comandos ao thread do GStreamer
+    video_command_tx: Option<mpsc::Sender<VideoCommand>>,
+    video_thread_handle: Option<thread::JoinHandle<()>>,
+    // ------------------------------------------------
+
     video_speed: f64,
     is_playing: bool,
     video_progress: f32,
@@ -217,30 +234,20 @@ struct RambleyFlixApp {
     fullscreen_mode: bool,
     theater_mode: bool,
 
-    // Sistema de playlists
     user_playlists: Vec<Playlist>,
     current_playlist: Option<Playlist>,
     show_create_playlist_dialog: bool,
     new_playlist_name: String,
 
-    // Configurações e filtros
     app_settings: AppSettings,
     duration_filter: String,
     sort_by: String,
 
-    // Downloads
     downloads_progress: HashMap<String, f32>,
-
-    // Sistema de notas
     video_notes: HashMap<String, String>,
-
-    video_speed_tx: mpsc::Sender<VideoMessage>,
-    video_speed_rx: Option<mpsc::Receiver<VideoMessage>>,
-
-    // Flag para controlar o ciclo de vida da thread de vídeo
-    video_thread_running: bool,
 }
 
+// Implementação do scraper
 impl WebScraper {
     fn new() -> Self {
         let client_builder = reqwest::Client::builder()
@@ -250,40 +257,20 @@ impl WebScraper {
         let client = client_builder.build().unwrap();
         let mut site_configs = HashMap::new();
 
-        site_configs.insert(
-            "pornhub".to_string(),
-            SiteConfig {
-                base_url: "https://www.pornhub.com".to_string(),
-                search_path: "/video/search?search=".to_string(),
-                video_selector: "a.linkVideoThumb".to_string(),
-                title_selector: "a.linkVideoThumb".to_string(),
-                thumbnail_selector: Some(".phimage img".to_string()),
-                duration_selector: Some(".duration".to_string()),
-                url_transform: Some(|href: &str| {
-                    if href.starts_with("/") {
-                        format!("https://www.pornhub.com{}", href)
-                    } else {
-                        href.to_string()
-                    }
-                }),
-                recommendations_path: None,
-                recommendations_selector: Some("div.relatedVideos a.linkVideoThumb".to_string()),
-            },
-        );
-
+        // Configurações de sites
         site_configs.insert(
             "youtube".to_string(),
             SiteConfig {
                 base_url: "https://www.youtube.com".to_string(),
                 search_path: "/results?search_query=".to_string(),
                 video_selector: "ytd-video-renderer a#thumbnail".to_string(),
-                title_selector: "h3.ytd-video-renderer a#video-title".to_string(),
-                thumbnail_selector: Some("img.yt-core-image".to_string()),
+                title_selector: "a#video-title".to_string(),
+                thumbnail_selector: Some("yt-image img".to_string()),
                 duration_selector: Some(
-                    "span.ytd-thumbnail-overlay-time-status-renderer".to_string(),
+                    "ytd-thumbnail-overlay-time-status-renderer".to_string(),
                 ),
                 url_transform: Some(|href: &str| {
-                    if href.starts_with("/") {
+                    if href.starts_with('/') {
                         format!("https://www.youtube.com{}", href)
                     } else {
                         href.to_string()
@@ -291,8 +278,23 @@ impl WebScraper {
                 }),
                 recommendations_path: None,
                 recommendations_selector: Some(
-                    "ytd-compact-video-renderer a#thumbnail".to_string(),
+                    "ytd-compact-video-renderer".to_string(),
                 ),
+            },
+        );
+
+        site_configs.insert(
+            "pornhub".to_string(),
+            SiteConfig {
+                base_url: "https://rt.pornhub.com".to_string(),
+                search_path: "/video/search?search=".to_string(),
+                video_selector: "div.phimage a".to_string(),
+                title_selector: "span.title a".to_string(),
+                thumbnail_selector: Some("img".to_string()),
+                duration_selector: Some("var.duration".to_string()),
+                url_transform: Some(|href: &str| format!("https://rt.pornhub.com{}", href)),
+                recommendations_path: None,
+                recommendations_selector: Some("div.phimage a".to_string()),
             },
         );
 
@@ -321,75 +323,50 @@ impl WebScraper {
             query.replace(' ', "+")
         );
 
-        println!("[DEBUG] Buscando na URL: {}", search_url);
-
         let html_content = self.fetch_with_retry(&search_url, 3).await?;
-
         let document = Html::parse_document(&html_content);
-        let video_selector = Selector::parse(&config.video_selector)
-            .map_err(|e| format!("Erro no seletor CSS: {:?}", e))?;
 
-        let elements = document.select(&video_selector);
-        println!(
-            "[DEBUG] Seletor de vídeo '{}' encontrou {} elementos.",
-            config.video_selector,
-            elements.count()
-        );
-
-        let title_selector = Selector::parse(&config.title_selector)
-            .map_err(|e| format!("Erro no seletor de título: {:?}", e))?;
+        let video_container_selector = Selector::parse(&config.video_selector)
+            .map_err(|e| format!("Erro no seletor de container: {:?}", e))?;
 
         let mut results = Vec::new();
 
-        for (i, element) in document.select(&video_selector).enumerate() {
-            if i >= limit {
-                break;
+        for element in document.select(&video_container_selector).take(limit) {
+            let href = element.value().attr("href").unwrap_or("").trim();
+            if href.is_empty() {
+                continue;
             }
 
-            let href = element.value().attr("href").unwrap_or("");
-            let url = if let Some(transform) = config.url_transform {
-                transform(href)
-            } else {
-                href.to_string()
-            };
+            let url = (config.url_transform.unwrap_or(|s| s.to_string()))(href);
 
-            let title_element = document.select(&title_selector).nth(i);
-            let title = if let Some(title_elem) = title_element {
-                if let Some(data_title) = title_elem.value().attr("data-title") {
-                    data_title.trim().to_string()
-                } else {
-                    title_elem.text().collect::<String>().trim().to_string()
-                }
-            } else {
-                element.text().collect::<String>().trim().to_string()
-            };
+            let title_selector = Selector::parse(&config.title_selector)
+                .map_err(|e| format!("Erro no seletor de título: {:?}", e))?;
 
-            let thumbnail = if let Some(thumb_sel) = &config.thumbnail_selector {
-                if let Ok(selector) = Selector::parse(thumb_sel) {
+            let title = element
+                .select(&title_selector)
+                .next()
+                .map(|e| e.text().collect::<String>().trim().to_string())
+                .or_else(|| element.value().attr("title").map(|s| s.trim().to_string()))
+                .unwrap_or_default();
+
+            let thumbnail = config.thumbnail_selector.as_ref().and_then(|sel| {
+                Selector::parse(sel).ok().and_then(|selector| {
                     element
                         .select(&selector)
                         .next()
                         .and_then(|img| img.value().attr("src"))
-                        .map(|s| s.to_string())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+                        .map(String::from)
+                })
+            });
 
-            let duration = if let Some(dur_sel) = &config.duration_selector {
-                if let Ok(selector) = Selector::parse(dur_sel) {
+            let duration = config.duration_selector.as_ref().and_then(|sel| {
+                Selector::parse(sel).ok().and_then(|selector| {
                     element
                         .select(&selector)
                         .next()
-                        .map(|elem| elem.text().collect::<String>().trim().to_string())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+                        .map(|d| d.text().collect::<String>().trim().to_string())
+                })
+            });
 
             if !url.is_empty() && !title.is_empty() {
                 results.push(VideoResult {
@@ -401,7 +378,6 @@ impl WebScraper {
                 });
             }
         }
-
         Ok(results)
     }
 
@@ -423,25 +399,22 @@ impl WebScraper {
             let recs_selector = Selector::parse(recs_sel)
                 .map_err(|e| format!("Erro no seletor de recomendações: {:?}", e))?;
 
-            for element in document.select(&recs_selector) {
-                let href = element.value().attr("href").unwrap_or("");
-                let url = if let Some(transform) = config.url_transform {
-                    transform(href)
-                } else {
-                    href.to_string()
-                };
+            for element in document.select(&recs_selector).take(10) {
+                let href = element.value().attr("href").unwrap_or("").trim();
+                if href.is_empty() {
+                    continue;
+                }
+
+                let url = (config.url_transform.unwrap_or(|s| s.to_string()))(href);
 
                 let title_selector = Selector::parse(&config.title_selector).ok();
-                let title = if let Some(title_sel) = title_selector {
+                let title = title_selector.and_then(|sel| {
                     element
-                        .select(&title_sel)
+                        .select(&sel)
                         .next()
-                        .and_then(|e| e.value().attr("title"))
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| element.text().collect::<String>())
-                } else {
-                    element.text().collect::<String>()
-                };
+                        .map(|t| t.text().collect::<String>().trim().to_string())
+                }).unwrap_or_default();
+
 
                 let thumbnail = if let Some(thumb_sel) = &config.thumbnail_selector {
                     if let Ok(selector) = Selector::parse(thumb_sel) {
@@ -542,27 +515,17 @@ impl WebScraper {
     }
 }
 
-impl Default for RambleyFlixApp {
-    fn default() -> Self {
-        let (video_speed_tx, video_speed_rx) = mpsc::channel();
-        Self::new(video_speed_tx, video_speed_rx)
-    }
-}
-
 impl RambleyFlixApp {
-    fn new(
-        video_speed_tx: mpsc::Sender<VideoMessage>,
-        video_speed_rx: mpsc::Receiver<VideoMessage>,
-    ) -> Self {
+    fn new() -> Self {
         let config_dir = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .unwrap_or_else(|| PathBuf::from("."))
             .join(".rambley_flix");
         fs::create_dir_all(&config_dir).ok();
 
         let (tx, rx) = mpsc::channel();
 
         let mut app = Self {
-            scraper: Arc::new(Mutex::new(WebScraper::new())),
+            scraper: Arc::new(TokioMutex::new(WebScraper::new())),
             users: HashMap::new(),
             current_user: None,
             login_attempts: 0,
@@ -587,18 +550,20 @@ impl RambleyFlixApp {
                     .build()
                     .expect("Erro ao criar runtime"),
             ),
+
             async_sender: tx,
             async_receiver: rx,
-
-            video_texture: None,
-            video_message_receiver: None,
 
             current_playing_video: None,
             video_recommendations: Vec::new(),
             loading_recommendations: false,
             recommendations_error: String::new(),
 
-            // Novos campos
+            video_texture: None,
+            current_frame: None,
+            video_command_tx: None,
+            video_thread_handle: None,
+
             video_speed: 1.0,
             is_playing: false,
             video_progress: 0.0,
@@ -617,10 +582,6 @@ impl RambleyFlixApp {
 
             downloads_progress: HashMap::new(),
             video_notes: HashMap::new(),
-
-            video_speed_tx,
-            video_speed_rx: Some(video_speed_rx),
-            video_thread_running: false, // Inicializa flag
         };
 
         app.add_default_users();
@@ -638,7 +599,7 @@ impl RambleyFlixApp {
         let senha_secreta = "";
 
         self.users.insert(
-            "".to_string(),
+            "Decaptado".to_string(),
             User {
                 username: "Decaptado".to_string(),
                 password: senha_secreta.to_string(),
@@ -661,6 +622,7 @@ impl RambleyFlixApp {
                 access: AccessLevel::Fake,
             },
         );
+        self.users.insert("".to_string(), User { username: "".to_string(), password: "".to_string(), access: AccessLevel::Full });
     }
 
     fn load_custom_users(&mut self) {
@@ -746,9 +708,7 @@ impl RambleyFlixApp {
             let result = scraper
                 .search_videos(&site, &query, videos_per_page * 4)
                 .await;
-
-            println!("[DEBUG] Resultado da busca: {:?}", &result);
-            sender.send(AsyncMessage::SearchComplete(result)).unwrap();
+            let _ = sender.send(AsyncMessage::SearchComplete(result));
         });
     }
 
@@ -764,10 +724,7 @@ impl RambleyFlixApp {
         self.rt.spawn(async move {
             let scraper = scraper_arc.lock().await;
             let result = scraper.search_recommendations(&video).await;
-
-            sender
-                .send(AsyncMessage::RecommendationsComplete(result))
-                .unwrap();
+            let _ = sender.send(AsyncMessage::RecommendationsComplete(result));
         });
     }
 
@@ -780,9 +737,7 @@ impl RambleyFlixApp {
         self.rt.spawn(async move {
             let scraper = scraper.lock().await;
             let result = scraper.download_thumbnail(&thumbnail_url).await;
-            sender
-                .send(AsyncMessage::ThumbnailLoaded(video_url, result))
-                .unwrap();
+            let _ = sender.send(AsyncMessage::ThumbnailLoaded(video_url, result));
         });
     }
 
@@ -953,10 +908,10 @@ impl RambleyFlixApp {
 
             ui.horizontal(|ui| {
                 ui.label("Buscar:");
-                ui.text_edit_singleline(&mut self.search_input);
+                let response = ui.text_edit_singleline(&mut self.search_input);
 
                 let search_button = ui.button("🔍 Buscar");
-                if search_button.clicked() && !self.search_input.is_empty() {
+                if (search_button.clicked() || response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) && !self.search_input.is_empty() {
                     self.loading_search = true;
                     self.video_results.clear();
                     self.video_thumbnails.clear();
@@ -981,7 +936,7 @@ impl RambleyFlixApp {
                             "YouTube",
                         );
                         if let Some(user) = &self.current_user {
-                            if matches!(user.access, AccessLevel::Full | AccessLevel::ViewOnly) {
+                            if matches!(user.access, AccessLevel::Full) {
                                 ui.selectable_value(
                                     &mut self.selected_site,
                                     "pornhub".to_string(),
@@ -1285,199 +1240,19 @@ impl RambleyFlixApp {
         });
     }
 
-    fn get_fallback_recommendations(&self) -> Vec<VideoResult> {
-        // Recomendações de exemplo quando não há dados reais
-        vec![
-            VideoResult {
-                title: "🎆 Fireworks Display 4K".to_string(),
-                url: "https://example.com/fireworks".to_string(),
-                thumbnail: Some(
-                    "https://via.placeholder.com/160x120/FF6B6B/FFFFFF?text=Fireworks".to_string(),
-                ),
-                duration: Some("3:45".to_string()),
-                site: "example".to_string(),
-            },
-            VideoResult {
-                title: "🌊 Ocean Waves Relaxing".to_string(),
-                url: "https://example.com/ocean".to_string(),
-                thumbnail: Some(
-                    "https://via.placeholder.com/160x120/4ECDC4/FFFFFF?text=Ocean".to_string(),
-                ),
-                duration: Some("10:20".to_string()),
-                site: "example".to_string(),
-            },
-            VideoResult {
-                title: "🎵 Lo-Fi Hip Hop Beats".to_string(),
-                url: "https://example.com/lofi".to_string(),
-                thumbnail: Some(
-                    "https://via.placeholder.com/160x120/9B59B6/FFFFFF?text=Lo-Fi".to_string(),
-                ),
-                duration: Some("2:15:30".to_string()),
-                site: "example".to_string(),
-            },
-            VideoResult {
-                title: "🌮 Nature Documentary".to_string(),
-                url: "https://example.com/nature".to_string(),
-                thumbnail: Some(
-                    "https://via.placeholder.com/160x120/27AE60/FFFFFF?text=Nature".to_string(),
-                ),
-                duration: Some("45:12".to_string()),
-                site: "example".to_string(),
-            },
-            VideoResult {
-                title: "🎃 Cooking Tutorial".to_string(),
-                url: "https://example.com/cooking".to_string(),
-                thumbnail: Some(
-                    "https://via.placeholder.com/160x120/F39C12/FFFFFF?text=Cooking".to_string(),
-                ),
-                duration: Some("15:45".to_string()),
-                site: "example".to_string(),
-            },
-            VideoResult {
-                title: "🏆 Sports Highlights".to_string(),
-                url: "https://example.com/sports".to_string(),
-                thumbnail: Some(
-                    "https://via.placeholder.com/160x120/E74C3C/FFFFFF?text=Sports".to_string(),
-                ),
-                duration: Some("8:30".to_string()),
-                site: "example".to_string(),
-            },
-            VideoResult {
-                title: "🎸 Guitar Lesson".to_string(),
-                url: "https://example.com/guitar".to_string(),
-                thumbnail: Some(
-                    "https://via.placeholder.com/160x120/8E44AD/FFFFFF?text=Guitar".to_string(),
-                ),
-                duration: Some("12:05".to_string()),
-                site: "example".to_string(),
-            },
-            VideoResult {
-                title: "🎆 Space Exploration".to_string(),
-                url: "https://example.com/space".to_string(),
-                thumbnail: Some(
-                    "https://via.placeholder.com/160x120/2C3E50/FFFFFF?text=Space".to_string(),
-                ),
-                duration: Some("28:40".to_string()),
-                site: "example".to_string(),
-            },
-            VideoResult {
-                title: "🎨 Art Tutorial".to_string(),
-                url: "https://example.com/art".to_string(),
-                thumbnail: Some(
-                    "https://via.placeholder.com/160x120/E67E22/FFFFFF?text=Art".to_string(),
-                ),
-                duration: Some("18:22".to_string()),
-                site: "example".to_string(),
-            },
-            VideoResult {
-                title: "📚 Programming Tips".to_string(),
-                url: "https://example.com/programming".to_string(),
-                thumbnail: Some(
-                    "https://via.placeholder.com/160x120/34495E/FFFFFF?text=Code".to_string(),
-                ),
-                duration: Some("25:15".to_string()),
-                site: "example".to_string(),
-            },
-            VideoResult {
-                title: "🌱 Gardening Guide".to_string(),
-                url: "https://example.com/garden".to_string(),
-                thumbnail: Some(
-                    "https://via.placeholder.com/160x120/2ECC71/FFFFFF?text=Garden".to_string(),
-                ),
-                duration: Some("14:33".to_string()),
-                site: "example".to_string(),
-            },
-            VideoResult {
-                title: "🏃 Fitness Workout".to_string(),
-                url: "https://example.com/fitness".to_string(),
-                thumbnail: Some(
-                    "https://via.placeholder.com/160x120/16A085/FFFFFF?text=Fitness".to_string(),
-                ),
-                duration: Some("35:20".to_string()),
-                site: "example".to_string(),
-            },
-        ]
-    }
-
-    fn show_grid_recommendation_item(
-        &mut self,
-        ui: &mut egui::Ui,
-        ctx: &egui::Context,
-        video: &VideoResult,
-        item_width: f32,
-    ) {
-        ui.group(|ui| {
-            ui.set_width(item_width);
-            ui.set_height(120.0);
-
-            ui.vertical(|ui| {
-                // Thumbnail maior para layout em grid
-                let thumbnail_size = Vec2::new(item_width - 20.0, 70.0);
-
-                if let Some(thumbnail_url) = &video.thumbnail {
-                    if !self.video_thumbnails.contains_key(&video.url) {
-                        self.video_thumbnails.insert(
-                            video.url.clone(),
-                            VideoThumbnail {
-                                texture: None,
-                                loading: true,
-                            },
-                        );
-                        self.load_thumbnail(&video.url, thumbnail_url);
-                    }
-
-                    if let Some(thumb_info) = self.video_thumbnails.get(&video.url) {
-                        if let Some(texture) = &thumb_info.texture {
-                            let image = egui::Image::new(texture)
-                                .fit_to_exact_size(thumbnail_size)
-                                .corner_radius(egui::CornerRadius::same(6));
-                            let image_button = ui.add(egui::ImageButton::new(image));
-                            if image_button.clicked() {
-                                self.play_video(video.clone());
-                            }
-                        } else if thumb_info.loading {
-                            ui.allocate_ui(thumbnail_size, |ui| {
-                                ui.centered_and_justified(|ui| {
-                                    ui.spinner();
-                                });
-                            });
-                        } else {
-                            ui.allocate_ui(thumbnail_size, |ui| {
-                                ui.centered_and_justified(|ui| {
-                                    ui.label("📷");
-                                });
-                            });
-                        }
-                    }
-                } else {
-                    ui.allocate_ui(thumbnail_size, |ui| {
-                        ui.centered_and_justified(|ui| {
-                            ui.label("📺");
-                        });
-                    });
-                }
-
-                // Título compacto
-                let title = if video.title.len() > 35 {
-                    format!("{}...", &video.title[..35])
-                } else {
-                    video.title.clone()
-                };
-
-                let title_button = ui.small_button(&title);
-                if title_button.clicked() {
-                    self.play_video(video.clone());
-                }
-
-                // Duração
-                if let Some(duration) = &video.duration {
-                    ui.horizontal(|ui| {
-                        ui.label("⏱");
-                        ui.small(&*duration);
-                    });
-                }
-            });
-        });
+    fn stop_video_playback(&mut self) {
+        if let Some(tx) = self.video_command_tx.take() {
+            // Envia o comando para parar, ignora o erro se o receptor já morreu
+            let _ = tx.send(VideoCommand::Stop);
+        }
+        if let Some(handle) = self.video_thread_handle.take() {
+            // Espera o thread do GStreamer terminar
+            let _ = handle.join();
+        }
+        // Limpa os recursos da UI
+        self.video_texture = None;
+        self.current_frame = None;
+        self.current_playing_video = None;
     }
 
     fn show_playing_video_screen(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1490,11 +1265,9 @@ impl RambleyFlixApp {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("🔙 Voltar").clicked() {
+                        self.stop_video_playback();
                         self.state = AppState::VideoResults;
-                        self.video_texture = None;
-                        self.video_message_receiver = None;
-                        // Garantir que a thread do vídeo seja encerrada
-                        self.video_thread_running = false;
+                        return; // Retorna para evitar processar o resto da UI neste frame
                     }
 
                     if ui.button("🔳 Fullscreen").clicked() {
@@ -1514,15 +1287,15 @@ impl RambleyFlixApp {
                         )
                         .changed()
                     {
-                        let _ = self
-                            .video_speed_tx
-                            .send(VideoMessage::SetSpeed(self.video_speed));
+                        if let Some(tx) = &self.video_command_tx {
+                            let _ = tx.send(VideoCommand::SetSpeed(self.video_speed));
+                        }
                     }
                     if ui.button("1x").clicked() {
                         self.video_speed = 1.0;
-                        let _ = self
-                            .video_speed_tx
-                            .send(VideoMessage::SetSpeed(self.video_speed));
+                        if let Some(tx) = &self.video_command_tx {
+                            let _ = tx.send(VideoCommand::SetSpeed(self.video_speed));
+                        }
                     }
                 });
             });
@@ -1530,21 +1303,18 @@ impl RambleyFlixApp {
             ui.separator();
 
             // Video Player
-            let available_size = ui.available_size();
+            let available_size = ui.available_size_before_wrap();
             let video_width = available_size.x;
             let video_height = video_width * 9.0 / 16.0;
             let video_size = Vec2::new(video_width, video_height);
 
-            if let Some((tex, (orig_w, orig_h))) = &self.video_texture {
-                let aspect = *orig_w as f32 / *orig_h as f32;
-                let display_height = video_width / aspect;
-                let final_size = Vec2::new(video_width, display_height.max(100.0));
+            if let Some(texture) = &self.video_texture {
+                let tex_size = texture.size_vec2();
+                let aspect_ratio = tex_size.x / tex_size.y;
+                let display_height = video_width / aspect_ratio;
+                let final_size = Vec2::new(video_width, display_height.min(available_size.y));
 
-                ui.add(
-                    egui::Image::new(tex)
-                        .fit_to_exact_size(final_size)
-                        .corner_radius(12.0),
-                );
+                ui.add(Image::new(texture).fit_to_exact_size(final_size));
             } else {
                 ui.allocate_ui(video_size, |ui| {
                     ui.centered_and_justified(|ui| {
@@ -1569,10 +1339,10 @@ impl RambleyFlixApp {
                     self.toggle_play_pause();
                 }
                 if ui.button("⏩ Avançar 10s").clicked() {
-                    self.seek_video(10.0);
+                    self.seek_video(10);
                 }
                 if ui.button("⏪ Voltar 10s").clicked() {
-                    self.seek_video(-10.0);
+                    self.seek_video(-10);
                 }
 
                 ui.add(
@@ -1791,17 +1561,22 @@ impl RambleyFlixApp {
 
     fn toggle_play_pause(&mut self) {
         self.is_playing = !self.is_playing;
-        let message = if self.is_playing {
-            VideoMessage::Play
+        let command = if self.is_playing {
+            VideoCommand::Play
         } else {
-            VideoMessage::Pause
+            VideoCommand::Pause
         };
-        let _ = self.video_speed_tx.send(message);
+        if let Some(tx) = &self.video_command_tx {
+            let _ = tx.send(command);
+        }
     }
 
-    fn seek_video(&mut self, seconds: f64) {
-        let _ = self.video_speed_tx.send(VideoMessage::Seek(seconds));
-        println!("Seeking {} seconds", seconds);
+    fn seek_video(&mut self, seconds: i64) {
+        if let Some(tx) = &self.video_command_tx {
+            // Converte segundos para nanossegundos para o GStreamer
+            let nanos = seconds * 1_000_000_000;
+            let _ = tx.send(VideoCommand::Seek(nanos));
+        }
     }
 
     fn download_video(&mut self, video: &VideoResult) {
@@ -1859,36 +1634,33 @@ impl RambleyFlixApp {
         }
     }
 
-    fn remove_from_favorites(&mut self, video: &VideoResult) {
-        let mut data = UserData::load(&self.config_dir);
-        data.favorites.retain(|v| v.url != video.url);
-        data.save(&self.config_dir);
-    }
-
+    // --- FUNÇÃO play_video COMPLETAMENTE REFEITA ---
     fn play_video(&mut self, video: VideoResult) {
-        // Limpar recursos anteriores
-        self.video_texture = None;
-        self.video_message_receiver = None;
+        // 1. Limpa qualquer recurso de vídeo anterior
+        self.stop_video_playback();
         self.save_to_history(&video.url);
 
-        let video_url = video.url.clone();
-        let (video_message_sender, video_message_receiver) = mpsc::channel();
-        self.video_message_receiver = Some(video_message_receiver);
-
+        // 2. Prepara o estado para o novo vídeo
+        self.is_playing = true;
         self.start_recommendations_search(video.clone());
         self.state = AppState::PlayingVideo;
 
-        // Resetar flag antes de iniciar nova thread
-        self.video_thread_running = true;
+        let video_url = video.url.clone();
+        let (command_tx, command_rx) = mpsc::channel::<VideoCommand>();
+        self.video_command_tx = Some(command_tx);
 
-        let video_speed_rx = self.video_speed_rx.take();
+        let frame_buffer = Arc::new(Mutex::new(None));
+        self.current_frame = Some(frame_buffer.clone());
 
-        thread::spawn(move || {
+        // 3. Spawna o thread do GStreamer
+        self.video_thread_handle = Some(thread::spawn(move || {
+            // Inicializa GStreamer
             if let Err(e) = gst::init() {
                 eprintln!("Erro ao inicializar GStreamer: {}", e);
                 return;
             }
 
+            // Obtém a URL direta do vídeo
             let direct_url = match Self::get_direct_video_url(&video_url) {
                 Ok(url) => url,
                 Err(e) => {
@@ -1897,154 +1669,138 @@ impl RambleyFlixApp {
                 }
             };
 
-            println!("[DEBUG] URL direta do vídeo: {}", direct_url);
-
+            // Constrói o pipeline do GStreamer
             let pipeline_str = format!(
-                "uridecodebin uri={} ! videoconvert ! video/x-raw,format=RGBA ! appsink name=sink",
+                "uridecodebin uri={} ! videoconvert ! videoscale ! video/x-raw,format=RGBA,width=1280,height=720 ! appsink name=sink",
                 direct_url
             );
 
             let pipeline = match gst::parse::launch(&pipeline_str) {
                 Ok(p) => p,
                 Err(e) => {
-                    eprintln!("Erro ao criar pipeline GStreamer: {}", e);
+                    eprintln!("Erro ao criar pipeline GStreamer: {}: {}", e, pipeline_str);
                     return;
                 }
             };
+            let pipeline = pipeline.downcast::<gst::Pipeline>().unwrap();
 
-            let pipeline = pipeline
-                .downcast::<gst::Pipeline>()
-                .expect("Elemento não é uma gst::Pipeline");
+            // Configura o appsink
+            let appsink = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
 
-            let appsink = pipeline
-                .by_name("sink")
-                .expect("Falha ao obter o elemento sink do pipeline")
-                .downcast::<gst_app::AppSink>()
-                .expect("Falha ao fazer downcast do sink para AppSink");
+            // Corrigido: `new_simple` para `Caps::builder`
+            let caps = gst::Caps::builder("video/x-raw")
+                .field("format", &"RGBA")
+                .field("width", &1280)
+                .field("height", &720)
+                .build();
+            appsink.set_caps(Some(&caps));
 
-            appsink.set_property("emit-signals", true);
-            appsink.set_property("sync", false);
+            let frame_buffer_clone = frame_buffer.clone();
 
-            if pipeline.set_state(gst::State::Playing).is_err() {
-                eprintln!("Erro ao iniciar reprodução");
-                return;
-            }
+            // Corrigido: `set_callback` para `set_callbacks`
+            appsink.set_callbacks(
+                gst_app::AppSinkCallbacks::builder()
+                    .new_sample(move |sink| {
+                        let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                        let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                        let caps = sample.caps().ok_or(gst::FlowError::Error)?;
+                        let s = caps.structure(0).ok_or(gst::FlowError::Error)?;
+                        let width = s.get::<i32>("width").map_err(|_| gst::FlowError::Error)? as usize;
+                        let height = s.get::<i32>("height").map_err(|_| gst::FlowError::Error)? as usize;
 
-            // Thread para controles (play/pause/seek)
-            let pipeline_clone = pipeline.clone();
-            let video_thread_running = true; // Flag para controlar a thread
+                        let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
 
-            thread::spawn(move || {
-                if let Some(receiver) = video_speed_rx {
-                    while let Ok(message) = receiver.recv() {
-                        match message {
-                            VideoMessage::SetSpeed(_) => {}
-                            VideoMessage::Play => {
-                                let _ = pipeline_clone.set_state(gst::State::Playing);
-                            }
-                            VideoMessage::Pause => {
-                                let _ = pipeline_clone.set_state(gst::State::Paused);
-                            }
-                            VideoMessage::Seek(seconds) => {
-                                if let Some(duration) =
-                                    pipeline_clone.query_duration::<gst::ClockTime>()
-                                {
-                                    let current_pos = pipeline_clone
-                                        .query_position::<gst::ClockTime>()
-                                        .unwrap_or(gst::ClockTime::ZERO);
+                        // Cria a ColorImage diretamente
+                        let color_image = ColorImage::from_rgba_unmultiplied([width, height], map.as_slice());
 
-                                    let new_pos = if seconds > 0.0 {
-                                        current_pos + gst::ClockTime::from_seconds(seconds as u64)
-                                    } else {
-                                        current_pos.saturating_sub(gst::ClockTime::from_seconds(
-                                            (-seconds) as u64,
-                                        ))
-                                    };
+                        // Coloca no buffer compartilhado
+                        *frame_buffer_clone.lock().unwrap() = Some(color_image);
 
-                                    let _ = pipeline_clone.seek_simple(
-                                        gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                                        new_pos.min(duration),
-                                    );
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            });
+                        // Corrigido: Retorna `FlowSuccess::Ok`
+                        Ok(gst::FlowSuccess::Ok)
+                    })
+                    .build(),
+            );
 
-            // Captura de frames sem travar a UI
-            let video_message_sender_clone = video_message_sender.clone();
+            // Inicia a reprodução
+            pipeline.set_state(gst::State::Playing).expect("Não foi possível iniciar o pipeline");
 
-            thread::spawn(move || {
-                loop {
-                    // Verificar se a thread deve continuar rodando
-                    if !video_thread_running {
-                        break;
-                    }
-
-                    match appsink.pull_sample() {
-                        Ok(sample) => {
-                            if let (Some(buffer), Some(caps)) = (sample.buffer(), sample.caps()) {
-                                if let Some(structure) = caps.structure(0) {
-                                    if let (Ok(width), Ok(height)) = (
-                                        structure.get::<i32>("width"),
-                                        structure.get::<i32>("height"),
-                                    ) {
-                                        if let Ok(map) = buffer.map_readable() {
-                                            let frame_data = map.as_slice().to_vec();
-
-                                            // Validar tamanho do frame
-                                            let expected_size = width * height * 4;
-                                            if frame_data.len() >= expected_size as usize {
-                                                let _ = video_message_sender_clone.send(
-                                                    VideoMessage::Frame(
-                                                        frame_data,
-                                                        (width as usize, height as usize),
-                                                    ),
-                                                );
-                                            } else {
-                                                eprintln!("Frame inválido: esperado {} bytes, recebido {}",
-                                                          expected_size, frame_data.len());
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(_) => break, // fim ou erro → sai do loop
-                    }
-                }
-            });
-
-            // Monitora mensagens do bus
             let bus = pipeline.bus().unwrap();
-            loop {
-                match bus.timed_pop(Some(gst::ClockTime::from_mseconds(50))) {
-                    Some(msg) => match msg.view() {
-                        gst::MessageView::Eos(..) => break,
+
+            // Loop principal do thread: escuta por mensagens no bus e comandos da UI
+            'main_loop: loop {
+                // Processa mensagens do GStreamer (EOS, Error)
+                if let Some(msg) = bus.timed_pop(Some(gst::ClockTime::from_mseconds(10))) {
+                    match msg.view() {
+                        gst::MessageView::Eos(..) => {
+                            println!("Fim do stream (EOS)");
+                            break 'main_loop;
+                        }
                         gst::MessageView::Error(err) => {
-                            eprintln!("Error: {}", err.error());
-                            let _ = video_message_sender.send(VideoMessage::Error(format!(
-                                "Erro no GStreamer: {}",
-                                err.error()
-                            )));
-                            break;
+                            // Corrigido: `err.debug_info()` para `err.debug()`
+                            eprintln!("Erro do pipeline: {} ({:?})", err.error(), err.debug());
+                            break 'main_loop;
                         }
                         _ => {}
+                    }
+                }
+
+                // Processa comandos da UI (Play, Pause, Seek, Stop)
+                match command_rx.try_recv() {
+                    Ok(command) => {
+                        match command {
+                            VideoCommand::Play => {
+                                pipeline.set_state(gst::State::Playing).ok();
+                            },
+                            VideoCommand::Pause => {
+                                pipeline.set_state(gst::State::Paused).ok();
+                            },
+                            VideoCommand::SetSpeed(rate) => {
+                                // Corrigido: Nova forma de criar o evento de seek
+                                let seek_event = gst::event::Seek::new(
+                                    rate,
+                                    gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+                                    gst::SeekType::None,
+                                    gst::ClockTime::ZERO,
+                                    gst::SeekType::None,
+                                    gst::ClockTime::NONE,
+                                );
+                                pipeline.send_event(seek_event);
+                            }
+                            VideoCommand::Seek(nanos) => {
+                                if let Some(current_pos) = pipeline.query_position::<gst::ClockTime>() {
+                                    let new_pos = if nanos > 0 {
+                                        current_pos.saturating_add(gst::ClockTime::from_nseconds(nanos as u64))
+                                    } else {
+                                        current_pos.saturating_sub(gst::ClockTime::from_nseconds(-nanos as u64))
+                                    };
+                                    pipeline.seek_simple(gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT, new_pos).ok();
+                                }
+                            },
+                            VideoCommand::Stop => {
+                                break 'main_loop;
+                            }
+                        }
                     },
-                    None => {}
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        println!("Canal de comando desconectado, encerrando thread.");
+                        break 'main_loop;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
                 }
             }
 
-            let _ = pipeline.set_state(gst::State::Null);
-        });
+            // Limpeza final
+            pipeline.set_state(gst::State::Null).expect("Não foi possível parar o pipeline");
+            println!("Thread do GStreamer finalizado.");
+        }));
     }
 
     fn get_direct_video_url(url: &str) -> Result<String, String> {
         // Try to extract direct video URL using yt-dlp
         let output = Command::new("yt-dlp")
             .arg("-g")
+            .arg("youtube:lang=en")
             .arg("--no-playlist")
             .arg(url)
             .output();
@@ -2065,7 +1821,7 @@ impl RambleyFlixApp {
                 }
             }
             Err(e) => {
-                eprintln!("yt-dlp not available: {}, using original URL", e);
+                eprintln!("yt-dlp não encontrado, usando URL original: {}", e);
                 Ok(url.to_string())
             }
         }
@@ -2252,34 +2008,35 @@ impl RambleyFlixApp {
     }
 }
 
+impl Default for RambleyFlixApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl eframe::App for RambleyFlixApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Pede um repaint constante quando o vídeo está tocando para manter a fluidez
+        if self.state == AppState::PlayingVideo {
+            ctx.request_repaint();
+        }
+
         self.handle_async_messages(ctx);
 
-        // Handle video frame updates (FPS otimizado) - usar try_recv em vez de recv
-        if let Some(receiver) = &self.video_message_receiver {
-            while let Ok(VideoMessage::Frame(frame_data, (width, height))) = receiver.try_recv() {
-                // Validação de tamanho de frame
-                if frame_data.len() >= width * height * 4 {
-                    let color_image =
-                        egui::ColorImage::from_rgba_unmultiplied([width, height], &frame_data);
-
-                    if let Some((texture, _)) = &mut self.video_texture {
-                        texture.set(color_image, egui::TextureOptions::default());
+        // --- LÓGICA DE ATUALIZAÇÃO DA TEXTURA DO VÍDEO (REFEITA) ---
+        if let Some(frame_buffer) = &self.current_frame {
+            // Tenta travar o mutex sem bloquear a UI
+            if let Ok(mut guard) = frame_buffer.try_lock() {
+                // Se houver um novo frame, pega ele
+                if let Some(new_frame) = guard.take() {
+                    // Se a textura já existe, atualiza os dados dela
+                    if let Some(texture) = &mut self.video_texture {
+                        texture.set(new_frame, egui::TextureOptions::LINEAR);
                     } else {
-                        let texture = ctx.load_texture(
-                            "video_frame",
-                            color_image,
-                            egui::TextureOptions::default(),
-                        );
-                        self.video_texture = Some((texture, (width, height)));
+                        // Senão, cria uma nova textura
+                        let texture = ctx.load_texture("video_frame", new_frame, egui::TextureOptions::LINEAR);
+                        self.video_texture = Some(texture);
                     }
-                } else {
-                    eprintln!(
-                        "Frame inválido: esperado {} bytes, recebido {}",
-                        width * height * 4,
-                        frame_data.len()
-                    );
                 }
             }
         }
@@ -2312,30 +2069,47 @@ impl eframe::App for RambleyFlixApp {
                 });
         }
 
-        // Sidebar
-        egui::SidePanel::left("sidebar").show(ctx, |ui| {
-            ui.heading("📚 Biblioteca");
-            ui.separator();
-            self.show_favorites_in_sidebar(ui, ctx);
-            self.show_playlists_section(ui);
-        });
-
-        // Painel central
-        egui::CentralPanel::default().show(ctx, |ui| match self.state {
-            AppState::Login => self.show_login_screen(ui),
-            AppState::MainMenu => self.show_main_menu(ui, ctx),
-            AppState::VideoSearch => self.show_search_screen(ui, ctx),
-            AppState::VideoResults => self.show_results_screen(ui, ctx),
-            AppState::PlayingVideo => self.show_playing_video_screen(ui, ctx),
-            AppState::Netflix => self.show_netflix_screen(ui),
-            AppState::History => self.show_history_screen(ui),
-            AppState::Downloads => self.show_downloads_screen(ui),
-            AppState::Settings => self.show_settings_screen(ui),
-            AppState::PlaylistView => {
-                ui.heading("📝 Playlists");
-                ui.separator();
+        // Renderiza a UI apenas se não estivermos em modo fullscreen
+        if !self.fullscreen_mode {
+            // Sidebar
+            if self.state != AppState::Login {
+                egui::SidePanel::left("sidebar").show(ctx, |ui| {
+                    ui.heading("📚 Biblioteca");
+                    ui.separator();
+                    self.show_favorites_in_sidebar(ui, ctx);
+                    self.show_playlists_section(ui);
+                });
             }
-        });
+
+            // Painel central
+            egui::CentralPanel::default().show(ctx, |ui| match self.state {
+                AppState::Login => self.show_login_screen(ui),
+                AppState::MainMenu => self.show_main_menu(ui, ctx),
+                AppState::VideoSearch => self.show_search_screen(ui, ctx),
+                AppState::VideoResults => self.show_results_screen(ui, ctx),
+                AppState::PlayingVideo => self.show_playing_video_screen(ui, ctx),
+                AppState::Netflix => self.show_netflix_screen(ui),
+                AppState::History => self.show_history_screen(ui),
+                AppState::Downloads => self.show_downloads_screen(ui),
+                AppState::Settings => self.show_settings_screen(ui),
+                AppState::PlaylistView => {
+                    ui.heading("📝 Playlists");
+                    ui.separator();
+                }
+            });
+        } else {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                if self.state == AppState::PlayingVideo {
+                    self.show_playing_video_screen(ui, ctx)
+                } else {
+                    self.fullscreen_mode = false;
+                }
+            });
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.stop_video_playback();
     }
 }
 
@@ -2347,11 +2121,9 @@ fn main() -> Result<(), eframe::Error> {
         ..Default::default()
     };
 
-    let (tx, rx) = std::sync::mpsc::channel();
-
     eframe::run_native(
         "RBFlix - Sistema de Streaming",
         options,
-        Box::new(|_cc| Ok(Box::new(RambleyFlixApp::new(tx, rx)))),
+        Box::new(|_cc| Ok(Box::new(RambleyFlixApp::new()))),
     )
 }

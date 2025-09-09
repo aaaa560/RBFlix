@@ -59,6 +59,7 @@ struct Playlist {
     name: String,
     videos: Vec<VideoMeta>,
     created_at: String,
+
 }
 
 // Dados do usuário
@@ -173,6 +174,7 @@ enum AppState {
     PlaylistView,
     Settings,
     Downloads,
+    ActivePlaylistView,
 }
 
 // Mensagens de controle do vídeo
@@ -1065,15 +1067,11 @@ impl RambleyFlixApp {
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 let thumbnail_size = Vec2::new(120.0, 90.0);
-
                 if let Some(thumbnail_url) = &video.thumbnail {
                     if !self.video_thumbnails.contains_key(&video.url) {
                         self.video_thumbnails.insert(
                             video.url.clone(),
-                            VideoThumbnail {
-                                texture: None,
-                                loading: true,
-                            },
+                            VideoThumbnail { texture: None, loading: true },
                         );
                         self.load_thumbnail(&video.url, thumbnail_url);
                     }
@@ -1111,20 +1109,16 @@ impl RambleyFlixApp {
                     ui.horizontal(|ui| {
                         ui.strong(&video.title);
                         if let Some(duration) = &video.duration {
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(format!("⏱ {}", duration));
-                                },
-                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(format!("⏱ {}", duration));
+                            });
                         }
                     });
-
                     ui.label(format!("🌐 {}", video.site));
 
                     ui.horizontal(|ui| {
+                        // Botão para reproduzir o vídeo
                         let play_button = ui.button("▶ Reproduzir");
-
                         if play_button.clicked() {
                             if let Some(user) = &self.current_user {
                                 match user.access {
@@ -1133,12 +1127,10 @@ impl RambleyFlixApp {
                                     }
                                     AccessLevel::Fake => {
                                         self.error_message =
-                                            "Acesso negado. Usuário sem permissão real."
-                                                .to_string();
+                                            "Acesso negado. Usuário sem permissão real.".to_string();
                                     }
                                     AccessLevel::NetflixOnly => {
-                                        self.error_message =
-                                            "Acesso permitido apenas ao Netflix.".to_string();
+                                        self.error_message = "Acesso permitido apenas ao Netflix.".to_string();
                                     }
                                     AccessLevel::None => {
                                         self.error_message = "Sem acesso.".to_string();
@@ -1147,14 +1139,23 @@ impl RambleyFlixApp {
                             }
                         }
 
+                        play_button.context_menu(|ui| {
+                            ui.menu_button("Adicionar à Playlist", |ui| {
+                                for playlist in &self.user_playlists.clone() {
+                                    if ui.button(&playlist.name).clicked() {
+                                        self.add_to_playlist(video, &playlist.name);
+                                        ui.close_menu();
+                                    }
+                                }
+                            });
+                        });
+
                         if ui.button("⭐ Favoritar").clicked() {
                             self.add_to_favorites(video);
                         }
-
                         if ui.button("📋 Copiar URL").clicked() {
                             ctx.copy_text(video.url.clone());
                         }
-
                         if ui.button("💾 Download").clicked() {
                             self.download_video(video);
                         }
@@ -1164,12 +1165,7 @@ impl RambleyFlixApp {
         });
     }
 
-    fn show_compact_recommendation_item(
-        &mut self,
-        ui: &mut egui::Ui,
-        _ctx: &egui::Context,
-        video: &VideoResult,
-    ) {
+    fn show_compact_recommendation_item(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context, video: &VideoResult) {
         ui.group(|ui| {
             ui.set_width(230.0);
 
@@ -1411,6 +1407,9 @@ impl RambleyFlixApp {
             ui.heading("⏳ Histórico de Reprodução");
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
+                if ui.button("🔙 Voltar ao Menu").clicked() {
+                    self.state = AppState::MainMenu;
+                }
                 let hist_file = self.config_dir.join("links.txt");
                 if let Ok(content) = fs::read_to_string(&hist_file) {
                     if content.trim().is_empty() {
@@ -1438,6 +1437,9 @@ impl RambleyFlixApp {
 
     fn show_downloads_screen(&mut self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
+            if ui.button("🔙 Voltar ao Menu").clicked() {
+                self.state = AppState::MainMenu;
+            }
             ui.heading("💾 Downloads");
             ui.separator();
 
@@ -1459,6 +1461,10 @@ impl RambleyFlixApp {
                         ui.add(egui::ProgressBar::new(*progress));
                     });
                 }
+            }
+
+            if ui.button("🔙 Voltar ao Menu").clicked() {
+                self.state = AppState::MainMenu;
             }
         });
     }
@@ -1494,6 +1500,10 @@ impl RambleyFlixApp {
                             "360p",
                         );
                     });
+
+                if ui.button("🔙 Voltar ao Menu").clicked() {
+                    self.state = AppState::MainMenu;
+                }
             });
 
             ui.checkbox(
@@ -1854,17 +1864,20 @@ impl RambleyFlixApp {
             if !playlist.videos.iter().any(|v| v.url == video.url) {
                 playlist.videos.push(video_meta);
                 self.save_user_data();
+                println!("Vídeo '{}' adicionado à playlist '{}'.", video.title, playlist_name);
+            } else {
+                println!("Vídeo '{}' já está na playlist '{}'.", video.title, playlist_name);
             }
         }
     }
 
     fn save_user_data(&self) {
-        let user_data = UserData {
-            last_watched: Vec::new(), // Load from existing data if needed
-            favorites: Vec::new(),    // Load from existing data if needed
+        let data = UserData {
+            last_watched: Vec::new(), // A tua lógica para o histórico
+            favorites: Vec::new(),    // A tua lógica para os favoritos
             playlists: self.user_playlists.clone(),
         };
-        user_data.save(&self.config_dir);
+        data.save(&self.config_dir);
     }
 
     fn show_main_menu(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
@@ -1911,10 +1924,7 @@ impl RambleyFlixApp {
 
             ui.add_space(10.0);
 
-            if ui
-                .add_sized(button_size, egui::Button::new("📝 Playlists"))
-                .clicked()
-            {
+            if ui.add_sized(button_size, egui::Button::new("📝 Playlists")).clicked() {
                 self.state = AppState::PlaylistView;
             }
 
@@ -2006,6 +2016,67 @@ impl RambleyFlixApp {
             ui.label("Usuários disponíveis: Decaptado, Guest, Espiao");
         });
     }
+
+    fn show_playlist_view(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.button("🔙 Voltar ao Menu").clicked() {
+                self.state = AppState::MainMenu;
+            }
+            ui.heading("📝 Minhas Playlists");
+        });
+        ui.separator();
+        ui.add_space(10.0);
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            if self.user_playlists.is_empty() {
+                ui.label("Ainda não tens nenhuma playlist.");
+            } else {
+                for playlist in self.user_playlists.clone() {
+                    if ui.button(&playlist.name).clicked() {
+                        self.current_playlist = Some(playlist.clone());
+                        self.state = AppState::ActivePlaylistView;
+                    }
+                }
+            }
+        });
+    }
+
+    fn show_active_playlist_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.horizontal(|ui| {
+            if ui.button("🔙 Voltar").clicked() {
+                self.state = AppState::PlaylistView;
+            }
+            if let Some(playlist) = &self.current_playlist {
+                ui.heading(format!("▶ {}", playlist.name));
+            }
+        });
+        ui.separator();
+        ui.add_space(10.0);
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            if let Some(playlist) = &self.current_playlist {
+                if playlist.videos.is_empty() {
+                    ui.label("Esta playlist está vazia.");
+                } else {
+                    let videos_as_results: Vec<VideoResult> = playlist.videos.iter().map(|meta| {
+                        VideoResult {
+                            title: meta.title.clone(),
+                            url: meta.url.clone(),
+                            thumbnail: meta.thumbnail.clone(),
+                            duration: None,
+                            site: "Local".to_string(), // Marcador para vídeos locais/salvos
+                        }
+                    }).collect();
+
+                    for video in videos_as_results.iter() {
+                        self.show_video_item(ui, ctx, video);
+                        ui.add_space(5.0);
+                    }
+                }
+            }
+        });
+    }
+
 }
 
 impl Default for RambleyFlixApp {
@@ -2078,6 +2149,9 @@ impl eframe::App for RambleyFlixApp {
                     ui.separator();
                     self.show_favorites_in_sidebar(ui, ctx);
                     self.show_playlists_section(ui);
+                    if ui.button("🔙 Voltar ao Menu").clicked() {
+                        self.state = AppState::MainMenu;
+                    }
                 });
             }
 
@@ -2095,7 +2169,9 @@ impl eframe::App for RambleyFlixApp {
                 AppState::PlaylistView => {
                     ui.heading("📝 Playlists");
                     ui.separator();
-                }
+                    self.show_playlist_view(ui);
+                },
+                AppState::ActivePlaylistView => self.show_active_playlist_view(ui, ctx),
             });
         } else {
             egui::CentralPanel::default().show(ctx, |ui| {

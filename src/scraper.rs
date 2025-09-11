@@ -5,7 +5,7 @@ use crate::video::VideoResult;
 
 // Config de sites
 #[derive(Debug, Clone)]
-struct SiteConfig {
+pub struct SiteConfig {
     pub base_url: String,
     pub search_path: String,
     pub video_selector: String,
@@ -19,8 +19,8 @@ struct SiteConfig {
 
 // Scraper
 pub struct WebScraper {
-    client: reqwest::Client,
-    site_configs: HashMap<String, SiteConfig>,
+    pub client: reqwest::Client,
+    pub site_configs: HashMap<String, SiteConfig>,
 }
 
 // Implementação do scraper

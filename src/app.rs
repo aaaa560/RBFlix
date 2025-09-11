@@ -14,6 +14,7 @@ use gstreamer_app as gst_app;
 use tokio::runtime::Runtime;
 use crate::video::VideoThumbnail;
 use crate::scraper::WebScraper;
+use crate::dev_mode::{DevMode, UIMessage};
 use crate::settings::AppSettings;
 use crate::user::{AccessLevel, User, UserData};
 use crate::video::{Playlist, VideoMeta, VideoResult};

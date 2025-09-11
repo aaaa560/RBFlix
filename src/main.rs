@@ -3,6 +3,9 @@ mod scraper;
 mod settings;
 mod user;
 mod video;
+mod dev_mode;
+mod encrypt;
+
 use app::RambleyFlixApp;
 use eframe::egui;
 use gstreamer::prelude::*;
